@@ -103,3 +103,7 @@ export function getSkyscraperModuleArgs(args: string[]) {
 
   throw new Error("Bad scraper config");
 }
+
+export function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

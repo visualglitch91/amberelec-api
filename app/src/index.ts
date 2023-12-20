@@ -3,7 +3,7 @@ import path from "path";
 import express from "express";
 import cors from "cors";
 import * as library from "./library";
-import { deleteEmptyDirectory, upload } from "./utils";
+import { deleteEmptyDirectory, upload, wait } from "./utils";
 
 const app = express();
 const PORT = Number(process.env.PORT);
@@ -17,10 +17,9 @@ library.mount().then(
 );
 
 app.post("/api/mount", (_, res) => {
-  library.mount().then(
-    () => res.send({ success: true }),
-    (err) => res.status(500).send({ error: err?.message })
-  );
+  library.mount().then((result) => {
+    res.status(result.success ? 200 : 500).send(result);
+  });
 });
 
 app.post("/api/scrape-all", async (req, res) => {
@@ -31,15 +30,20 @@ app.post("/api/scrape-all", async (req, res) => {
   );
 });
 
-app.get("/api/status", async (_, res) => {
-  try {
-    const mounted = await library.isMounted();
-    const scraperStatus = library.getScraperStatus();
-    const platforms = mounted ? await library.getPlatforms() : [];
-    return res.send({ mounted, scraperStatus, platforms });
-  } catch (err: any) {
-    return res.status(500).send(err?.message);
-  }
+app.get("/api/status", (_, res) => {
+  const scraperStatus = library.getScraperStatus();
+
+  Promise.race(
+    [
+      library.getPlatforms(),
+      scraperStatus === "idle"
+        ? wait(4000).then(() => Promise.reject())
+        : undefined,
+    ].filter(Boolean)
+  ).then(
+    (platforms) => res.send({ mounted: true, scraperStatus, platforms }),
+    () => res.send({ mounted: false, scraperStatus, platforms: [] })
+  );
 });
 
 app.get("/api/platform/:platform/games", (req, res) => {
@@ -76,6 +80,21 @@ app.post(
     }
   }
 );
+
+app.get("/api/platform/:platform/media", (req, res) => {
+  const filePath = req.query.path;
+
+  if (!filePath || typeof filePath !== "string") {
+    return res.status(400).send("Path is missing from query or not a string");
+  }
+
+  try {
+    const fullPath = library.getMediaFullPath(req.params.platform, filePath);
+    return res.sendFile(fullPath);
+  } catch (err: any) {
+    return res.status(500).send({ error: err?.message });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Server is listening on port ${PORT}...`);

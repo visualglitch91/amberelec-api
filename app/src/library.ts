@@ -7,9 +7,10 @@ import {
   getSkyscraperModuleArgs,
   mergeSkyscraperFlags,
   spawn,
+  wait,
 } from "./utils";
 
-let mountPromise: Promise<void> | null = null;
+let mountPromise: Promise<{ success: boolean; error?: string }> | null = null;
 
 const xmlParser = new XMLParser();
 const libraryDir = "/mnt/library";
@@ -64,19 +65,31 @@ const skyscraperPlatforms = [
 ];
 
 export function isMounted() {
-  return fs.access(path.join(libraryDir, "bios"), fs.constants.F_OK).then(
-    () => true,
-    () => false
-  );
+  return Promise.race(
+    [
+      scraperStatus === "idle" ? wait(1_000).then(() => "timeout") : undefined,
+      fs.access(path.join(libraryDir, "bios"), fs.constants.F_OK).then(
+        () => "mounted",
+        () => "unmounted"
+      ),
+    ].filter(Boolean)
+  ).then((result) => result === "mounted");
 }
 
 export async function mount() {
   if (await isMounted()) {
-    return;
+    return { success: true };
   }
 
   if (!mountPromise) {
-    mountPromise = spawn("/scripts/mount.sh");
+    mountPromise = spawn("/scripts/mount.sh").then(
+      () => ({ success: true }),
+      (err: any) => ({ success: false, error: err?.message })
+    );
+
+    mountPromise.finally(() => {
+      mountPromise = null;
+    });
   }
 
   return mountPromise;
@@ -84,31 +97,27 @@ export async function mount() {
 
 export async function getPlatforms() {
   if (!(await isMounted())) {
-    return [];
+    throw new Error("Library not mounted");
   }
 
   const platforms: Platform[] = [];
 
-  try {
-    const subdirs = await fs.readdir(libraryDir);
+  const subdirs = await fs.readdir(libraryDir);
 
-    for (const subdir of subdirs) {
-      const fullPath = path.join(libraryDir, subdir);
-      const stats = await fs.stat(fullPath);
+  for (const subdir of subdirs) {
+    const fullPath = path.join(libraryDir, subdir);
+    const stats = await fs.stat(fullPath);
 
-      if (stats.isDirectory() && skyscraperPlatforms.includes(subdir)) {
-        const filesInDirectory = await fs
-          .readdir(path.join(fullPath, "roms"))
-          .catch(() => []);
+    if (stats.isDirectory() && skyscraperPlatforms.includes(subdir)) {
+      const filesInDirectory = await fs
+        .readdir(path.join(fullPath, "roms"))
+        .catch(() => []);
 
-        platforms.push({
-          name: subdir,
-          enabled: filesInDirectory.length > 0,
-        });
-      }
+      platforms.push({
+        name: subdir,
+        enabled: filesInDirectory.length > 0,
+      });
     }
-  } catch (error) {
-    console.error("Error reading directories:", error);
   }
 
   return platforms;
@@ -136,7 +145,9 @@ export async function getGames(platform: string): Promise<Game[]> {
     })
   );
 
-  return existingGames.filter((it) => it.exists).map((it) => it.game);
+  return existingGames
+    .filter((it) => it.exists)
+    .map((it) => ({ ...it.game, platform }));
 }
 
 let scraperStatus: ScraperStatus = "idle";
@@ -167,7 +178,7 @@ export async function scrapeAll(platforms?: string[]) {
           platforms.filter((it) => it.enabled).map((it) => it.name)
         );
 
-    console.log("Scraping platforms", platformsToScrape);
+    console.log("Scraping platforms started", platformsToScrape);
 
     for (const platform of platformsToScrape) {
       const inputDir = path.join(libraryDir, platform);
@@ -194,6 +205,8 @@ export async function scrapeAll(platforms?: string[]) {
       ]);
     }
 
+    console.log("Scraping platforms ended", platformsToScrape);
+
     scraperStatus = "idle";
   };
 
@@ -212,6 +225,8 @@ export async function scrapeGame(platform: string, filePath: string) {
   }
 
   scraperStatus = "scraping-game";
+
+  console.log("Scraping file started", filePath);
 
   const inputDir = path.join(libraryDir, platform);
 
@@ -252,5 +267,19 @@ export async function scrapeGame(platform: string, filePath: string) {
     throw new Error("Game not added");
   }
 
+  console.log("Scraping file ended", filePath);
+
   scraperStatus = "idle";
+}
+
+export function getMediaFullPath(platform: string, filePath: string) {
+  const fullPath = path.resolve(path.join(libraryDir, platform, filePath));
+
+  if (
+    fullPath.startsWith(path.resolve(path.join(libraryDir, platform, "media")))
+  ) {
+    return fullPath;
+  }
+
+  throw new Error("Invalid media file path");
 }
